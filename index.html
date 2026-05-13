@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WebRTC + ntfy Chat Room</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+    #chat, #webrtc { flex: 1; padding: 1rem; box-sizing: border-box; overflow: auto; }
+    #chat { border-right: 1px solid #ddd; display: flex; flex-direction: column; }
+    #messages { flex: 1; border: 1px solid #ccc; padding: .5rem; overflow-y: auto; background: #fafafa; }
+    #chat-form { display: flex; margin-top: .5rem; gap: .5rem; }
+    #chat-form input { flex: 1; padding: .4rem; }
+    #chat-form button { padding: .4rem .8rem; }
+    #webrtc video { width: 100%; max-height: 40vh; background: #000; margin-bottom: .5rem; }
+    #webrtc-controls { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .5rem; }
+    input, button { font: inherit; }
+  </style>
+</head>
+<body>
+  <!-- CHAT (ntfy) -->
+  <section id="chat">
+    <h2>Chat</h2>
+    <div>
+      <label>
+        Room topic:
+        <input id="topic" value="my-chat-room" />
+      </label>
+      <button id="connect-chat">Connect</button>
+    </div>
+    <div id="messages"></div>
+    <form id="chat-form">
+      <input id="chat-input" placeholder="Type a message…" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
+  <!-- WEBRTC SCREEN SHARE -->
+  <section id="webrtc">
+    <h2>Screen sharing</h2>
+    <div id="webrtc-controls">
+      <button id="start-share">Start screen share</button>
+      <button id="stop-share" disabled>Stop</button>
+      <button id="create-offer">Create offer</button>
+      <button id="accept-offer">Accept offer</button>
+    </div>
+
+    <div>
+      <h3>Local screen</h3>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div>
+      <h3>Remote screen</h3>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+
+    <details>
+      <summary>Signaling (copy/paste)</summary>
+      <div>
+        <h4>Local SDP</h4>
+        <textarea id="localSdp" rows="6" style="width:100%;"></textarea>
+      </div>
+      <div>
+        <h4>Remote SDP</h4>
+        <textarea id="remoteSdp" rows="6" style="width:100%;"></textarea>
+      </div>
+    </details>
+  </section>
+
+  <script>
+    // ---------- ntfy CHAT ----------
+    const ntfyBase = 'https://ntfy.sh';
+    let topic = document.getElementById('topic').value.trim();
+    let eventSource = null;
+
+    const messagesEl = document.getElementById('messages');
+    const chatInput = document.getElementById('chat-input');
+    const chatForm = document.getElementById('chat-form');
+    const connectChatBtn = document.getElementById('connect-chat');
+
+    function appendMessage(text, meta = '') {
+      const div = document.createElement('div');
+      div.textContent = meta ? `[${meta}] ${text}` : text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function connectToTopic() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      topic = document.getElementById('topic').value.trim() || 'my-chat-room';
+      const url = `${ntfyBase}/${encodeURIComponent(topic)}/sse`;
+      eventSource = new EventSource(url);
+
+      eventSource.onopen = () => appendMessage(`Connected to topic "${topic}"`, 'system');
+      eventSource.onerror = () => appendMessage('Connection error (ntfy)', 'system');
+      eventSource.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.message) {
+            appendMessage(data.message, data.title || 'msg');
+          }
+        } catch {
+          // fallback if not JSON
+          appendMessage(e.data, 'raw');
+        }
+      };
+    }
+
+    connectChatBtn.addEventListener('click', connectToTopic);
+
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (!text) return;
+      chatInput.value = '';
+
+      const url = `${ntfyBase}/${encodeURIComponent(topic)}`;
+      await fetch(url, {
+        method: 'POST',
+        body: text
+      });
+      // local echo
+      appendMessage(text, 'you');
+    });
+
+    // Auto-connect on load
+    connectToTopic();
+
+    // ---------- WEBRTC SCREEN SHARE ----------
+    let pc = null;
+    let localStream = null;
+
+    const startShareBtn = document.getElementById('start-share');
+    const stopShareBtn = document.getElementById('stop-share');
+    const createOfferBtn = document.getElementById('create-offer');
+    const acceptOfferBtn = document.getElementById('accept-offer');
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const localSdp = document.getElementById('localSdp');
+    const remoteSdp = document.getElementById('remoteSdp');
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) return;
+        // When gathering is complete, show SDP
+        localSdp.value = JSON.stringify(pc.localDescription);
+      };
+
+      pc.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+      };
+    }
+
+    startShareBtn.addEventListener('click', async () => {
+      try {
+        localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        localVideo.srcObject = localStream;
+
+        if (!pc) createPeerConnection();
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+        startShareBtn.disabled = true;
+        stopShareBtn.disabled = false;
+      } catch (err) {
+        alert('Screen share failed: ' + err.message);
+      }
+    });
+
+    stopShareBtn.addEventListener('click', () => {
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream = null;
+        localVideo.srcObject = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      startShareBtn.disabled = false;
+      stopShareBtn.disabled = true;
+      localSdp.value = '';
+      remoteSdp.value = '';
+    });
+
+    // Offerer side
+    createOfferBtn.addEventListener('click', async () => {
+      if (!pc) createPeerConnection();
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      // SDP will appear in localSdp when ICE completes
+    });
+
+    // Answerer side
+    acceptOfferBtn.addEventListener('click', async () => {
+      const remote = remoteSdp.value.trim();
+      if (!remote) {
+        alert('Paste remote SDP first.');
+        return;
+      }
+      const desc = JSON.parse(remote);
+
+      if (!pc) createPeerConnection();
+      await pc.setRemoteDescription(desc);
+
+      if (desc.type === 'offer') {
+        // We are the answerer
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        // SDP will appear in localSdp when ICE completes
+      } else if (desc.type === 'answer') {
+        // We are the offerer, just set remote description
+      }
+    });
+  </script>
+</body>
+</html>
